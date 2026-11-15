@@ -6,6 +6,7 @@ import ipaddress
 import math
 import os
 import re
+import ssl
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from contextlib import contextmanager
@@ -144,6 +145,50 @@ def base_url(value: str) -> str:
     except (ValueError, httpx.InvalidURL):
         raise ValueError("Use an HTTPS origin, or HTTP with a literal loopback address.") from None
     return value.rstrip("/")
+
+
+def tls_context(value: ssl.SSLContext | None) -> ssl.SSLContext:
+    """The caller's context, or httpcore's default: OpenSSL's default locations plus certifi."""
+    if value is None:
+        return httpcore.default_ssl_context()
+    if not isinstance(value, ssl.SSLContext):
+        raise TypeError("ssl_context must be an ssl.SSLContext.")
+    if value.verify_mode != ssl.CERT_REQUIRED or not value.check_hostname:
+        raise ValueError("ssl_context must verify certificates and host names.")
+    return value
+
+
+def proxy_config(value: str | None, origin: str, context: ssl.SSLContext) -> httpx.Proxy | None:
+    """An explicit http or https proxy that reaches an HTTPS origin through CONNECT.
+
+    Credentials in the URL go only to the proxy, as Proxy-Authorization, and no
+    error repeats the URL. An https proxy is verified with the same context.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("proxy must be a URL string.")
+    try:
+        parts = urlsplit(value)
+        if (
+            parts.scheme not in ("http", "https")
+            or not parts.hostname
+            or parts.query
+            or parts.fragment
+            or parts.path not in ("", "/")
+            or any(ord(character) <= 32 for character in value)
+        ):
+            raise ValueError
+        parts.port
+        url = httpx.URL(value)
+    except (ValueError, httpx.InvalidURL):
+        raise ValueError(
+            "Use an http:// or https:// proxy URL with a host and an optional port."
+        ) from None
+    if urlsplit(origin).scheme != "https":
+        # Forwarding plain HTTP would hand the bearer token to the proxy.
+        raise ValueError("A proxy requires an HTTPS base_url.")
+    return httpx.Proxy(url, ssl_context=context if url.scheme == "https" else None)
 
 
 def invalid_response() -> ProoflineError:
@@ -430,10 +475,17 @@ class AsyncDeadlineStream(httpx.AsyncByteStream):
 
 
 class RetryTransport(httpx.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(
+        self,
+        token: SecretStr,
+        timeout: float,
+        *,
+        proxy: httpx.Proxy | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = SyncHTTPTransport()
+        self._inner = SyncHTTPTransport(proxy=proxy, ssl_context=ssl_context)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         for attempt in range(4):
@@ -481,12 +533,19 @@ class RetryTransport(httpx.BaseTransport):
 
 
 class AsyncRetryTransport(httpx.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(
+        self,
+        token: SecretStr,
+        timeout: float,
+        *,
+        proxy: httpx.Proxy | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         self._token = token
         self._timeout = timeout
-        # The synchronous pool's default trust: OpenSSL's default locations plus certifi.
+        # Without ssl_context, the same default trust as the synchronous pool.
         self._inner = httpx.AsyncHTTPTransport(
-            verify=httpcore.default_ssl_context(), trust_env=False
+            verify=tls_context(ssl_context), proxy=proxy, trust_env=False
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

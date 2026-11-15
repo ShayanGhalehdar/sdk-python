@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import ssl
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from time import monotonic, sleep
@@ -179,7 +180,9 @@ class ProoflineClient(Operations):
     """Synchronous typed HTTP operations.
 
     Name resolution, connection, TLS and socket operations stop at the configured
-    HTTP timeout and at a wait deadline.
+    HTTP timeout and at a wait deadline. proxy is an http:// or https:// proxy URL
+    for an HTTPS origin; variables such as HTTPS_PROXY are never read. ssl_context
+    replaces the default certificate verification and must check host names.
     """
 
     def __init__(
@@ -188,9 +191,13 @@ class ProoflineClient(Operations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        proxy: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        context = _transport.tls_context(ssl_context)
+        proxy_config = _transport.proxy_config(proxy, self._base_url, context)
         self._http = httpx.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -201,7 +208,9 @@ class ProoflineClient(Operations):
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(
+                self._api.token, timeout, proxy=proxy_config, ssl_context=context
+            ),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
@@ -511,15 +520,21 @@ class ProoflineClient(Operations):
 
 
 class AsyncProoflineClient(AsyncOperations):
+    """Asynchronous typed HTTP operations with the same proxy and ssl_context options."""
+
     def __init__(
         self,
         token: str | SecretStr | None = None,
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        proxy: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        context = _transport.tls_context(ssl_context)
+        proxy_config = _transport.proxy_config(proxy, self._base_url, context)
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -530,7 +545,9 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(
+                self._api.token, timeout, proxy=proxy_config, ssl_context=context
+            ),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)
