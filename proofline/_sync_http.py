@@ -130,6 +130,9 @@ def mapped_errors() -> Iterator[None]:
         raise httpx.ReadTimeout("The request deadline expired.") from None
     except (httpcore.NetworkError, httpcore.ProtocolError):
         raise httpx.TransportError("The HTTP transport failed.") from None
+    except httpcore.ProxyError:
+        # A refused CONNECT, such as a 407, is a transport failure like the ones above.
+        raise httpx.ProxyError("The proxy refused the tunnel.") from None
 
 
 class ResponseStream(httpx.SyncByteStream):
@@ -146,9 +149,39 @@ class ResponseStream(httpx.SyncByteStream):
 
 
 class Transport(httpx.BaseTransport):
-    def __init__(self) -> None:
-        self._pool = httpcore.ConnectionPool(
-            ssl_context=httpcore.default_ssl_context(),
+    """A pool, or an HTTP proxy pool, whose sockets and TLS stop at the request deadline.
+
+    Through a proxy, HTTPS origins use a CONNECT tunnel. The proxy lookup, the
+    CONNECT exchange and the TLS handshake inside the tunnel use the same
+    deadline-bounded backend as direct connections.
+    """
+
+    def __init__(
+        self, *, proxy: httpx.Proxy | None = None, ssl_context: ssl.SSLContext | None = None
+    ) -> None:
+        context = httpcore.default_ssl_context() if ssl_context is None else ssl_context
+        self._pool: httpcore.ConnectionPool
+        if proxy is None:
+            self._pool = httpcore.ConnectionPool(
+                ssl_context=context,
+                network_backend=NetworkBackend(),
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=5,
+            )
+            return
+        # The same construction as httpx.HTTPTransport for an http or https proxy.
+        self._pool = httpcore.HTTPProxy(
+            proxy_url=httpcore.URL(
+                scheme=proxy.url.raw_scheme,
+                host=proxy.url.raw_host,
+                port=proxy.url.port,
+                target=proxy.url.raw_path,
+            ),
+            proxy_auth=proxy.raw_auth,
+            proxy_headers=proxy.headers.raw,
+            ssl_context=context,
+            proxy_ssl_context=proxy.ssl_context,
             network_backend=NetworkBackend(),
             max_connections=100,
             max_keepalive_connections=20,

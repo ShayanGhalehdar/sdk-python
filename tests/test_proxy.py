@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 
 import httpcore
+import httpx
 import pytest
 from pydantic import SecretStr
 
-from proofline import AsyncProoflineClient, ProoflineClient, ProoflineError
+from proofline import AsyncProoflineClient, ProoflineClient, ProoflineError, _sync_http
 
 from .fixtures import ORG, REPOSITORY, TOKEN
-from .http_server import Reply, Request, Server
+from .http_server import Reply, Request, Server, TunnelProxy
 
 Client = ProoflineClient | AsyncProoflineClient
 MODES = pytest.mark.parametrize("mode", ["sync", "async"])
@@ -72,3 +73,22 @@ async def test_both_clients_share_the_default_certificate_trust(
             assert [item.full_name for item in result.repositories] == ["repo/name"]
         assert len(server.requests) == 1
         assert server.requests[0].headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_sync_transport_tunnels_https_and_maps_a_refused_connect() -> None:
+    with Server(repositories, tls=server_tls()) as server, TunnelProxy() as proxy:
+        port = server.url.rsplit(":", 1)[1]
+        transport = _sync_http.Transport(proxy=httpx.Proxy(proxy.url), ssl_context=private_ca())
+        with httpx.Client(transport=transport) as client:
+            response = client.get(f"{server.url}/names", headers={"Authorization": "Bearer t"})
+            assert response.json()["repositories"][0]["full_name"] == "repo/name"
+        assert [(item.method, item.target) for item in proxy.requests] == [
+            ("CONNECT", f"127.0.0.1:{port}")
+        ]
+        assert "Authorization" not in proxy.requests[0].headers
+        assert server.requests[0].headers["Authorization"] == "Bearer t"
+    with TunnelProxy(407) as proxy:
+        with httpx.Client(transport=_sync_http.Transport(proxy=httpx.Proxy(proxy.url))) as client:
+            with pytest.raises(httpx.ProxyError):
+                client.get("https://127.0.0.1:9/names")
+        assert [item.method for item in proxy.requests] == ["CONNECT"]
