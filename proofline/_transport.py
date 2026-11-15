@@ -17,6 +17,7 @@ from typing import Any, TypeAlias, cast
 from urllib.parse import urlsplit
 
 import anyio
+import httpcore
 import httpx
 from pydantic import SecretStr
 
@@ -483,7 +484,10 @@ class AsyncRetryTransport(httpx.AsyncBaseTransport):
     def __init__(self, token: SecretStr, timeout: float) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = httpx.AsyncHTTPTransport()
+        # The synchronous pool's default trust: OpenSSL's default locations plus certifi.
+        self._inner = httpx.AsyncHTTPTransport(
+            verify=httpcore.default_ssl_context(), trust_env=False
+        )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         for attempt in range(4):

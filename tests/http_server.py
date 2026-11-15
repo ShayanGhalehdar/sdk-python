@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -34,7 +35,9 @@ class Reply:
 
 
 class Server(AbstractContextManager["Server"]):
-    def __init__(self, respond: Callable[[Request, int], Reply]) -> None:
+    def __init__(
+        self, respond: Callable[[Request, int], Reply], tls: ssl.SSLContext | None = None
+    ) -> None:
         self.requests: list[Request] = []
         self._lock = threading.Lock()
         owner = self
@@ -93,10 +96,13 @@ class Server(AbstractContextManager["Server"]):
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
+        if tls is not None:
+            self._server.socket = tls.wrap_socket(self._server.socket, server_side=True)
         self._thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
         )
-        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        scheme = "http" if tls is None else "https"
+        self.url = f"{scheme}://127.0.0.1:{self._server.server_port}"
 
     def __enter__(self) -> Self:
         self._thread.start()
