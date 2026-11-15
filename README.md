@@ -20,6 +20,24 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Proxies and private certificate authorities
+
+Pass `proxy` when the network reaches Proofline only through an HTTP proxy, and `ssl_context` when that proxy intercepts TLS with your company's certificate authority:
+
+```python
+import os
+import ssl
+from proofline import ProoflineClient
+
+context = ssl.create_default_context(cafile="/etc/ssl/certs/company-root.pem")
+with ProoflineClient(proxy=os.environ["HTTPS_PROXY"], ssl_context=context) as client:
+    ...
+```
+
+`proxy` accepts an `http://` or `https://` URL with a host and an optional port, and requires an HTTPS `base_url`. Requests go through a CONNECT tunnel, so the token stays inside TLS to Proofline unless the proxy intercepts TLS. Credentials in the proxy URL are sent only to the proxy. The clients never read `HTTPS_PROXY` or other proxy variables, so pass the value explicitly.
+
+Without `ssl_context`, both clients verify against OpenSSL's default locations, which honour `SSL_CERT_FILE` and `SSL_CERT_DIR`, plus certifi. A context that turns off certificate or host name checks raises `ValueError`. To verify against the operating system's trust store, as the Proofline CLI does, pass `truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)` from the `truststore` package.
+
 ## Errors and refusals
 
 A refused request raises `ProoflineError` with the server problem's `status`, `type`, `title` and `detail`. When a review request creates nothing, the error also carries `refusal`, whose `reason` names the setting to change, such as `NO_LINKED_ENVIRONMENT` or `ENVIRONMENT_NOT_READY`, and `repository_name`. `RunNowRefusal` names the type of `refusal`. A refusal that does not match the public contract keeps its status, `title` and `detail` with the type `urn:proofline:sdk:invalid-response` and no `refusal`. The token is redacted from every text field, and `repr` and `str` show only the status.
